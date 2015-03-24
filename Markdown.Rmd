@@ -1,0 +1,310 @@
+---
+title: "Capstone Project, Exploratory Analysis"
+author: "Pablo Arias"
+date: "3/24/2015"
+output: html_document
+---
+
+##Introduction
+This report is an exploratory analysis of the unstructured data provided for the Capstone Course of  Coursera's John Hopkins Data Science Specialization ([Capstone Dataset](http://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip)). The data has been previously manipulated by SwiftKey from the original source found at [HC Corpora](http://www.corpora.heliohost.org). There are files for English, German, Finish, and Russian. The ultimate goal for this data is to be used to build a US English Natural Language Processing predictive model of text to predict the next word based on previous words. Other languages will be ignored. This document describes specific characteristics of the data that will aid in the success of the final product to be delivered. 
+
+We will be using R package *tm* (among others), as a framework for text manipulation for this exploratory analysis.
+
+##The Raw data
+
+The data has three very distinct sources of text: blogs, news and twitter. This data was sourced from the web with web crawlers. From the [corpora documentation](http://www.corpora.heliohost.org/aboutcorpus.html) we learn that there might still be text from other languages in the US English files, as well a profanity words, which will be extracted from the data. The data has three separate files for each of the sources and each text string is represented in a line of the file. Below a summary of the corpus.
+
+
+```{r libraries, cache=FALSE, echo=FALSE, include=FALSE}
+library(data.table)
+library(tm)
+library(SnowballC)
+library(parallel)
+library(htmlwidgets)
+library(caret)
+if (!require("DT")) devtools::install_github("rstudio/DT")
+library(DT)
+#library(rJava) 
+#.jinit(parameters="-Xmx128g")
+#library(RWeka)
+library(ggplot2)
+library(wordcloud)
+
+# Cluster initialization
+cluster <- makeCluster(detectCores())
+clusterEvalQ(cluster, library(tm))
+clusterEvalQ(cluster, library(data.table))
+options(mc.cores=4)
+```
+
+```{r readfiles, cache=TRUE, echo=FALSE, include=FALSE}
+fileNames <- list.files("data/capstone/final/en_US", pattern="*.txt")
+cons <- lapply(paste0("data/capstone/final/en_US/",fileNames), file, open = "r", encoding = "UTF-8")
+files <- lapply(cons, readLines, skipNul=TRUE) # NUL characters to skip
+close(cons[[1]])
+close(cons[[2]])
+close(cons[[3]])
+```
+
+```{r summary, cache=TRUE, echo=FALSE, include=FALSE}
+wordCounts <- sapply(files, function (x) {length(unlist(strsplit(x," ")))})
+meanCharsLine <- round(sapply(files, function (x) {mean(nchar(x))}))
+numberRows <- sapply(files, length)
+fileSizes <- sapply(files, object.size)
+filesSummary <- data.frame(fileNames, numberRows, meanCharsLine, 
+                           fileSizes, wordCounts)
+```
+
+```{r datatable, echo=FALSE}
+datatable(filesSummary, rownames=F, colnames = c("File Name", "Number of Rows", 
+                  "Mean Characters/line", "Size", "Word Count"),
+          options = list(dom="t"),
+          caption="Table 1: Corpus Summary")                              
+
+```
+
+From the summary we can see that there is a relatively even distribution of data among the three data sources, particularly in terms of word count. This is good because we would like the predictive model to have an even representation of all the three writing styles. 
+
+Since we intent to remove profanity words from the content, we will be using a bad word list obtained [here](http://badwordslist.googlecode.com/files/badwords.txt). No stop-words will be removed from the sources because we want the predictor to also predict these words.
+
+```{r badwords, cache=FALSE, echo=FALSE, include=FALSE}
+if (!file.exists("data/capstone/badwords.txt")) {
+    download.file("http://badwordslist.googlecode.com/files/badwords.txt", 
+                  "data/capstone/badwords.txt")
+}
+```
+
+The data is expected to have punctuation, which does not add any value to our predictor, so it will be removed. It is also expected that the corpus will have numbers. Here is an example of the first 100 characters of 3 entries in the news document:
+
+```{r example1, cache=TRUE, echo=FALSE}
+paste0(substr(files[[1]][1:3],0,100), " ...")
+```
+
+We can see quotation marks, exclamation and numbers. We can assume the same for the other documents. We can also see that some words are capitalized. For our predictor we will transform to lower case.
+
+Let's take a look at the instances of numbers (series of one or more numbers) as a proportion of the total amount of words for each of the three document types.
+
+```{r numbers, cache=TRUE, echo=FALSE}
+numbered <- sapply(files, function (x) { length(regmatches(x, regexpr("[0-9]+", x)))})
+paste0(round((numbered*100)/wordCounts,2), "%")
+```
+
+It is a very low percentages. We can be confident that the effect of removing numbers will not be significant in the predictive value of our model. 
+
+Because the data was read in UTF-8 encoding and because we know there are foreign language words (non-English), we can check how many characters are non-ASCII characters as a proportion of the total characters. way to determine how many lines have foreign language words.
+
+```{r foreign, cache=TRUE, echo=FALSE}
+foreingChars <- sapply (files, function (x) { sum(grepl("I_WAS_NOT_ASCII", iconv(x, 
+                                              "latin1", "ASCII", sub="I_WAS_NOT_ASCII")))})
+paste0(round(100*foreingChars/fileSizes, 2),"%")
+```
+
+Again, pretty low percentage.
+
+
+##Transforming the data
+Now that we have an idea of how our data is arranged and how it looks, we can proceed to transform and tokenize so we can do some exploratory analysis. The transformation will keep in mind what the ultimate goal for this data is.
+
+Things to consider:
+
+* The effect of removing punctuation will have in contractions like "I'm", "doesn't", etc. Ideally we would want to leave those to improve the predictive value and styles of writing, but we will remove. 
+* Adjacent words between the end of a sentence and the beginning of the next will be formed. This is an issue that could be addressed by splitting sentences before removing punctuation, but would not consider the cases where punctuation was omitted. We will ignore this for now.
+* Stemming could improve the predictive value by reducing the universe of possible words combinations and increasing the frequency of certain words, but it will make it a little bit cumbersome to offer a prediction that is missing the word suffix. We will not do stemming. 
+* There are foreign words that need to be removed, by replacing non-ASCII with blanks
+* Because of the nature of the source of this data and because this corpus was generated from human created data, it is likely that there are syntax errors in the data, specially in the twitter feeds because of the tendency to shorten words. We will not be addressing this since most likely these words will have very low occurrence.
+
+Because transforming is computationally expensive for a data set this big and because we know that a representative sample can be used to infer facts about a population, we will use a smaller data set made of a 10% random sample size. 
+
+```{r corpus, cache=TRUE, echo=TRUE}
+set.seed(1023)
+# Get a random sample 10% the size 
+samples <- lapply(files, function(x) as.logical(rbinom(length(x), 1, prob=0.1)))
+for (i in 1:3) {files[[i]] <- files[[i]][samples[[i]]]}
+
+# Remove non-ASCII characters
+files <- lapply(files, iconv, "UTF-8", "ASCII", sub="")
+
+# Project only requires to cover US English langauge
+corpus <- Corpus(VectorSource(files))
+
+paste0(substr(corpus[[1]]$content[1:3],0,100), " ...")
+# Remove numbers
+corpus <- tm_map(corpus, removeNumbers)
+# Remove Punctuation
+corpus <- tm_map(corpus, removePunctuation)
+# Transform to lower case
+corpus <- tm_map(corpus, content_transformer(tolower))
+# Remove extra white spaces
+corpus <- tm_map(corpus, stripWhitespace)
+paste0(substr(corpus[[1]]$content[1:3],0,100), " ...")
+```
+
+We will now remove all bad words contained in the dictionary previously downloaded. Keeping in mind that what determines what a bad word is, is very subjective.
+
+```{r badwords2, cache=TRUE}
+undisered <- readLines("data/capstone/badwords.txt")
+undisered <- removePunctuation(undisered)
+undisered <- removeNumbers(undisered)
+corpus <- tm_map(corpus, removeWords, undisered)
+```
+
+
+##Exploratory Analysis
+One of the most common methods for Natural Language Processing (NLP) is N-grams. N-grams allow to create a simple probabilistic model where a word likelihood is determined by the previous words. An N-gram is a sequence of n items in a given text or speech. The items could be characters, sounds, syllables, words, etc. In this analysis we will be considering words.
+
+An N-gram of one word is called a "unigram"; two words a "bigram" or "digram", three words a "trigram". Larger sizes are commonly referred by the number "four-gram", "five-gram", etc. 
+
+We first need to tokenyze the corpus. We will use the *NGramTokenizer* function from the *RWeka* package. 
+
+```{r tokenization }
+# Tokenize functions. Defined like this to take advantadge of multiple-processors 
+unigram <- function(x) {RWeka::NGramTokenizer(x, RWeka::Weka_control(min = 1, max = 1))}
+bigram <- function(x) {RWeka::NGramTokenizer(x, RWeka::Weka_control(min = 2, max = 2))}
+trigram <- function(x) {RWeka::NGramTokenizer(x, RWeka::Weka_control(min = 3, max = 3))}
+
+# Tokenization
+tdmUnigram <- TermDocumentMatrix(corpus, control = list(tokenize = unigram))
+tdmBigram <- TermDocumentMatrix(corpus, control = list(tokenize = bigram))
+tdmTrigram <- TermDocumentMatrix(corpus, control = list(tokenize = trigram))
+
+# Calculate Frequencies and sort descending
+unigramFreq <- sort(rowSums(as.matrix(tdmUnigram)), decreasing = T)
+bigramFreq <- sort(rowSums(as.matrix(tdmBigram)), decreasing = T)
+trigramFreq <- sort(rowSums(as.matrix(tdmTrigram)), decreasing = T)
+```
+
+Let's plot the 20 most common words at the bottom word cloud for all n-grams
+
+```{r plot1, cache=TRUE, echo=FALSE}
+plotDT <- data.table("Word" = names(unigramFreq[1:20]), "Frequency" = head(unigramFreq, 20))     
+uFPlot <- ggplot(plotDT, aes(x = reorder(Word, Frequency), y = Frequency)) + 
+                geom_bar(stat = "identity", fill="pink") + 
+                coord_flip() + 
+                geom_text(aes(label=Frequency), vjust=0.5, hjust=1, size=3) +
+                xlab("Words") + ggtitle("Top 20 Unigrams") +
+                theme_bw()
+uFPlot
+
+```
+
+As expected , we can see that the most common words are a combination of articles, prepositions, connection words and some verbs. We would expect to see the most common word "the" in several of the top bigrams. 
+
+
+Below the top 20 Bi-grams
+
+```{r plot2, cache=TRUE, echo=FALSE}
+plotDT <- data.table("Word" = names(bigramFreq[1:20]), "Frequency" = head(bigramFreq, 20))     
+bFPlot <- ggplot(plotDT, aes(x = reorder(Word, Frequency), y = Frequency)) + 
+                geom_bar(stat = "identity", fill="pink") + 
+                coord_flip() + 
+                geom_text(aes(label=Frequency), vjust=0.5, hjust=1, size=3) +
+                xlab("Words") + ggtitle("Top 20 Bigrams") +
+                theme_bw()
+bFPlot
+```
+
+
+We can see that the word "the" appears 8 times in the top 10 bigrams, in combination with words that are also top 20 uni-grams
+
+Below the top 20 Tri-grams
+
+```{r plot3, cache=TRUE, echo=FALSE}
+
+plotDT <- data.table("Word" = names(trigramFreq[1:20]), "Frequency" = head(trigramFreq, 20))     
+tFPlot <- ggplot(plotDT, aes(x = reorder(Word, Frequency), y = Frequency)) + 
+                geom_bar(stat = "identity", fill="pink") + 
+                coord_flip() + 
+                geom_text(aes(label=Frequency), vjust=0.5, hjust=1, size=3) +
+                xlab("Words") + ggtitle("Top 20 Trigrams")
+tFPlot
+```
+
+We can see on all the plots that just a few terms have significant higher frequency than the rest. 
+
+```{r plot3.5, cache=TRUE, echo=FALSE, warning=FALSE}
+par(mfrow=c(1,3))
+#Word Clouds
+wordcloud(words = names(unigramFreq),
+          freq = unigramFreq,
+          random.order=FALSE,
+          rot.per=0.15,
+          use.r.layout=FALSE,
+          #scale=c(8,.2),
+          max.words=200,
+          colors=brewer.pal(8,"Dark2"))
+wordcloud(words = names(bigramFreq),
+          freq = bigramFreq,
+          random.order=FALSE,
+          rot.per=0.15,
+          use.r.layout=FALSE,
+          #scale=c(8,.2),
+          max.words=200,
+          colors=brewer.pal(8,"Dark2"))
+wordcloud(words = names(trigramFreq),
+          freq = trigramFreq,
+          random.order=FALSE,
+          rot.per=0.15,
+          use.r.layout=FALSE,
+          #scale=c(8,.2),
+          max.words=200,
+          colors=brewer.pal(8,"Dark2"))
+
+```
+
+We can also plot the count of words with the lowest frequencies (1 to 5) 
+
+```{r plot4, cache=TRUE, echo=FALSE}
+plotDT <- data.table("Frequency" = names(table(unigramFreq)[1:5]), 
+                  "Count" = head(table(unigramFreq), 5))     
+bFPlot <- ggplot(plotDT, aes(x = Frequency, y = Count)) + 
+                geom_bar(stat = "identity", fill="pink") + 
+                geom_text(aes(label=Count), vjust=0.5, size=3) +
+                xlab("Word Frequency") + ggtitle("Counts of Word with lowest frequencies")
+bFPlot
+```
+
+We can see that `r round(plotDT[1,]$Count/length(unigramFreq),2)*100`% of the corpus are words that only occur once. These words could be intentional or unintentional typos, proper names, left over from character substitution, etc. These words can later be removed, since they have little to none predictive value.
+
+The plot below shows the cumulative frequency of words instances. The question of how many unique words are needed to cover 50% and 90% of all word instances in the corpus is also shown.
+
+
+```{r plot5, cache=TRUE, echo=FALSE}
+# Normalized cumulative frequency plot
+rowNum <- length(unigramFreq)     # Number of words in sample
+cumsumUni <- cumsum(unigramFreq)  # Cumulative sum
+cumsumUni <- round((100*cumsumUni/cumsumUni[rowNum]),3) # Normalize
+cumsumUni <- data.table("Words" = 1:rowNum, "Percentage" = cumsumUni)
+
+# Words to cover 50%  and 90% of instances
+freq50 <- cumsumUni[Percentage == 50]
+freq90 <- cumsumUni[Percentage == 90]
+
+ggplot(cumsumUni, aes(x=Words, y=Percentage, group=1)) +
+    geom_line() +
+    geom_vline(xintercept = freq90$Word, color="blue") +
+    geom_hline(yintercept = freq90$Percentage, color="blue") + 
+    geom_vline(xintercept = freq50$Word, color="green") + 
+    geom_hline(yintercept = freq50$Percentage, color="green") +
+    ggtitle("Cumulative frequency of words")
+    
+freq50
+freq90
+```
+
+So `r freq50$Words` words account for 50% of the instances of words in the document sample and `r freq90$Words` words for 90% of the words instances.
+
+### Additional considerations
+If we needed to evaluate how many of the words come from foreign languages, it would be relatively easy to identify which words belong to English by comparing against a dictionary, but it would hard to determine if the rest of the words belong to other languages or are just typos. One could compare words against a multitude of other languages, but this would be computational expensive. Making this determination has no purpose in our predictor.
+
+Stemming is a well documented mechanism to use a smaller dictionary to cover the same amount of phrases. Also changing words to lowercase significantly reduce the number of possible combinations and increase the frequency of common words. Other sources could be added, but we are assuming this predictor will be used to write content for the web in these three sources types.
+
+##Plans for predictor
+As previously mentioned, the predictor will be relying on N-grams and a take on correlation between words found on the same sentence will be done. To accomplish the second, I might generate another model with a stemmed corpus and no stop-words. This way correlative values can be calculated with the *tm* package and use that in combination with N-grams to make a better prediction.
+
+The goal is to predict the next word, but our predictor will also offer the current word prediction as it is being typed in the same one Swiftkey and other predictors do it on mobile phones.
+
+A take on addressing contractions will be done maybe with a dictionary of contraction's, so when "Im" is type, we can offer "I'm" as a correction. Also, an attempt will be done to address typos by trying to offer the word with the most amount of characters similar to the one type.
+
+
+
+
