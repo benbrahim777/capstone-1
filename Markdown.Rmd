@@ -159,13 +159,17 @@ We first need to tokenyze the corpus. We will use the *NGramTokenizer* function 
 ```{r tokenization }
 # Tokenize functions. Defined like this to take advantadge of multiple-processors 
 unigram <- function(x) {RWeka::NGramTokenizer(x, RWeka::Weka_control(min = 1, max = 1))}
+                                                          
 bigram <- function(x) {RWeka::NGramTokenizer(x, RWeka::Weka_control(min = 2, max = 2))}
 trigram <- function(x) {RWeka::NGramTokenizer(x, RWeka::Weka_control(min = 3, max = 3))}
 
 # Tokenization
-tdmUnigram <- TermDocumentMatrix(corpus, control = list(tokenize = unigram))
-tdmBigram <- TermDocumentMatrix(corpus, control = list(tokenize = bigram))
-tdmTrigram <- TermDocumentMatrix(corpus, control = list(tokenize = trigram))
+tdmUnigram <- TermDocumentMatrix(corpus, control = list(tokenize = unigram, 
+                                                        wordLengths=c(1, Inf)))
+tdmBigram <- TermDocumentMatrix(corpus, control = list(tokenize = bigram, 
+                                                       wordLengths=c(1, Inf)))
+tdmTrigram <- TermDocumentMatrix(corpus, control = list(tokenize = trigram, 
+                                                        wordLengths=c(1, Inf)))
 
 # Calculate Frequencies and sort descending
 unigramFreq <- sort(rowSums(as.matrix(tdmUnigram)), decreasing = T)
@@ -175,7 +179,7 @@ trigramFreq <- sort(rowSums(as.matrix(tdmTrigram)), decreasing = T)
 
 Let's plot the 20 most common words at the bottom word cloud for all n-grams
 
-```{r plot1, cache=TRUE, echo=FALSE}
+```{r plot1, cache=FALSE, echo=FALSE}
 plotDT <- data.table("Word" = names(unigramFreq[1:20]), "Frequency" = head(unigramFreq, 20))     
 uFPlot <- ggplot(plotDT, aes(x = reorder(Word, Frequency), y = Frequency)) + 
                 geom_bar(stat = "identity", fill="pink") + 
@@ -192,7 +196,7 @@ As expected , we can see that the most common words are a combination of article
 
 Below the top 20 Bi-grams
 
-```{r plot2, cache=TRUE, echo=FALSE}
+```{r plot2, cache=FALSE, echo=FALSE}
 plotDT <- data.table("Word" = names(bigramFreq[1:20]), "Frequency" = head(bigramFreq, 20))     
 bFPlot <- ggplot(plotDT, aes(x = reorder(Word, Frequency), y = Frequency)) + 
                 geom_bar(stat = "identity", fill="pink") + 
@@ -208,7 +212,7 @@ We can see that the word "the" appears 8 times in the top 10 bigrams, in combina
 
 Below the top 20 Tri-grams
 
-```{r plot3, cache=TRUE, echo=FALSE}
+```{r plot3, cache=FALSE, echo=FALSE}
 
 plotDT <- data.table("Word" = names(trigramFreq[1:20]), "Frequency" = head(trigramFreq, 20))     
 tFPlot <- ggplot(plotDT, aes(x = reorder(Word, Frequency), y = Frequency)) + 
